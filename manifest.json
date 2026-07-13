@@ -6,7 +6,7 @@
     "type": "onlinestream-provider",
     "description": "Integrates Miruro as an online streaming provider for Seanime.",
     "author": "Fup-1",
-    "icon": "https://github.com/Fup-1/miruro/blob/main/icon.png",
+    "icon": "",
     "lang": "en",
     "userConfig": {
         "version": 1,
