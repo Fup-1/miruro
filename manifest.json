@@ -1,18 +1,18 @@
 {
-    "id": "miruro",
-    "name": "Miruro",
-    "version": "1.0.0",
-    "language": "typescript",
-    "type": "onlinestream-provider",
-    "description": "Integrates Miruro as an online streaming provider for Seanime.",
-    "author": "Fup-1",
-    "icon": "https://github.com/Fup-1/miruro/blob/main/icon.png",
-    "lang": "en",
-    "userConfig": {
-        "version": "1.0.0",
-        "requiresConfig": false,
-        "fields": []
-    },
-    "payloadURI": "https://raw.githubusercontent.com/Fup-1/miruro/refs/heads/main/miruro.ts",
-    "manifestURI": "https://raw.githubusercontent.com/Fup-1/miruro/refs/heads/main/manifest.json"
+  "id": "miruro",
+  "name": "Miruro",
+  "version": "1.0.0",
+  "language": "typescript",
+  "type": "onlinestream-provider",
+  "description": "Integrates Miruro as an online streaming provider for Seanime.",
+  "author": "Fup-1",
+  "icon": "https://raw.githubusercontent.com/Fup-1/miruro/main/icon.png",
+  "lang": "en",
+  "userConfig": {
+    "version": 1,
+    "requiresConfig": false,
+    "fields": []
+  },
+  "payloadURI": "https://raw.githubusercontent.com/Fup-1/miruro/main/miruro.ts",
+  "manifestURI": "https://raw.githubusercontent.com/Fup-1/miruro/main/manifest.json"
 }
