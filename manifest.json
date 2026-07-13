@@ -1,10 +1,10 @@
 {
   "id": "miruro",
   "name": "Miruro",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "language": "typescript",
   "type": "onlinestream-provider",
-  "description": "Integrates Miruro as an online streaming provider for Seanime.",
+  "description": "Miruro online streaming provider for Seanime with dynamic title, episode, Sub, Dub, server, and subtitle resolution.",
   "author": "Fup-1",
   "icon": "https://raw.githubusercontent.com/Fup-1/miruro/main/icon.png",
   "lang": "en",
