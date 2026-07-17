@@ -21,7 +21,7 @@ class Provider {
 
     getSettings(): Settings {
         this.log("init", "getSettings", {
-            version: "1.2.0",
+            version: "1.2.1",
             debug: this.debugEnabled(),
         })
 
@@ -635,41 +635,126 @@ class Provider {
             query: envelope.query,
         })
 
-        const response = await fetch(url, {
-            headers: {
-                Accept: "text/plain, application/json",
-                Referer: this.api + "/",
-                "User-Agent": this.userAgent,
+        // Miruro's Cloudflare response is normally transported with
+        // Content-Encoding: zstd. Seanime 3.10.1's Goja fetch bridge can
+        // reject that response before response.text() is available.
+        // Request an identity response first, then retry with minimal headers
+        // in case the runtime rejects the Accept-Encoding override itself.
+        const attempts: any[] = [
+            {
+                name: "identity",
+                headers: {
+                    Accept: "*/*",
+                    "Accept-Encoding": "identity",
+                    Referer: this.api + "/",
+                    "User-Agent": this.userAgent,
+                    "Cache-Control": "no-cache",
+                    Pragma: "no-cache",
+                },
             },
-        })
+            {
+                name: "minimal",
+                headers: {
+                    Accept: "*/*",
+                    Referer: this.api + "/",
+                    "User-Agent": this.userAgent,
+                },
+            },
+        ]
 
-        if (!response.ok) {
-            throw new Error(
-                "Miruro " +
-                path +
-                " request failed with HTTP " +
-                String(response.status)
-            )
+        let lastError: any = null
+
+        for (let attemptIndex = 0; attemptIndex < attempts.length; attemptIndex++) {
+            const attempt = attempts[attemptIndex]
+
+            try {
+                this.log(trace, "transport attempt", {
+                    name: attempt.name,
+                    acceptEncoding:
+                        attempt.headers["Accept-Encoding"] || "runtime-default",
+                })
+
+                const response = await fetch(url, {
+                    headers: attempt.headers,
+                })
+
+                this.log(trace, "response received", {
+                    name: attempt.name,
+                    status: Number(response.status),
+                    ok: Boolean(response.ok),
+                })
+
+                if (!response.ok) {
+                    let responsePreview = ""
+
+                    try {
+                        responsePreview = String(await response.text())
+                            .replace(/\s+/g, " ")
+                            .slice(0, 180)
+                    } catch (_) {
+                        responsePreview = ""
+                    }
+
+                    throw new Error(
+                        "Miruro " +
+                        path +
+                        " request failed with HTTP " +
+                        String(response.status) +
+                        (responsePreview
+                            ? ": " + responsePreview
+                            : "")
+                    )
+                }
+
+                let text = ""
+
+                try {
+                    text = String(await response.text())
+                } catch (bodyError) {
+                    this.error(
+                        trace,
+                        "response body read failed on " + attempt.name,
+                        bodyError
+                    )
+                    throw bodyError
+                }
+
+                this.log(trace, "response body read", {
+                    name: attempt.name,
+                    length: text.length,
+                    prefix: text.slice(0, 12),
+                })
+
+                const decoded = this.decodePipeResponse(text)
+
+                this.log(trace, "response decoded", {
+                    path: path,
+                    transport: attempt.name,
+                    type: Array.isArray(decoded) ? "array" : typeof decoded,
+                    count: Array.isArray(decoded)
+                        ? decoded.length
+                        : decoded && typeof decoded === "object"
+                            ? Object.keys(decoded).length
+                            : 0,
+                })
+
+                return decoded
+            } catch (error) {
+                lastError = error
+                this.error(
+                    trace,
+                    "transport attempt failed: " + attempt.name,
+                    error
+                )
+            }
         }
 
-        const text = await response.text()
-
-        try {
-            const decoded = this.decodePipeResponse(String(text))
-            this.log(trace, "response decoded", {
-                path: path,
-                type: Array.isArray(decoded) ? "array" : typeof decoded,
-                count: Array.isArray(decoded)
-                    ? decoded.length
-                    : decoded && typeof decoded === "object"
-                        ? Object.keys(decoded).length
-                        : 0,
-            })
-            return decoded
-        } catch (error) {
-            this.error(trace, "response decode failed", error)
-            throw error
-        }
+        throw new Error(
+            "Miruro " +
+            path +
+            " transport failed after retries: " +
+            this.errorMessage(lastError)
+        )
     }
 
     private async ensurePipeConfig(): Promise<void> {
