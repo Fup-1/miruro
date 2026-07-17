@@ -21,8 +21,141 @@ class Provider {
   private protocolVersion = "0.2.0";
   private configPromise: Promise<void> | null = null;
   private readonly episodeCache = new Map<string, any>();
+  private debugSequence = 0;
+  private debugOverride: boolean | null = null;
+
+  private isDebugEnabled(context?: any): boolean {
+    const globalObject: any =
+      typeof globalThis !== "undefined" ? (globalThis as any) : {};
+
+    const candidates = [
+      context?.debug,
+      context?.userConfig?.debug,
+      context?.config?.debug,
+      (this as any)?.debug,
+      (this as any)?.userConfig?.debug,
+      (this as any)?.config?.debug,
+      globalObject?.userConfig?.debug,
+      globalObject?.config?.debug,
+      globalObject?.extensionConfig?.debug,
+      globalObject?.__USER_CONFIG__?.debug,
+      globalObject?.__SEANIME_EXTENSION_CONFIG__?.debug,
+    ];
+
+    for (const value of candidates) {
+      if (typeof value === "boolean") {
+        this.debugOverride = value;
+        return value;
+      }
+
+      if (typeof value === "string") {
+        const normalized = value.trim().toLowerCase();
+        if (normalized === "true" || normalized === "1" || normalized === "yes") {
+          this.debugOverride = true;
+          return true;
+        }
+        if (normalized === "false" || normalized === "0" || normalized === "no") {
+          this.debugOverride = false;
+          return false;
+        }
+      }
+    }
+
+    if (this.debugOverride !== null) return this.debugOverride;
+
+    // Diagnostic build default. This guarantees useful logs even when an older
+    // Seanime build does not expose extension userConfig to the provider VM.
+    return true;
+  }
+
+  private nextTrace(stage: string): string {
+    this.debugSequence += 1;
+    return `${stage}-${this.debugSequence}`;
+  }
+
+  private debug(
+    stage: string,
+    message: string,
+    details?: any,
+    context?: any
+  ): void {
+    if (!this.isDebugEnabled(context)) return;
+
+    const safeDetails = this.sanitizeDebugValue(details);
+    if (safeDetails === undefined) {
+      console.log(`[Miruro Debug][${stage}] ${message}`);
+    } else {
+      console.log(`[Miruro Debug][${stage}] ${message}`, safeDetails);
+    }
+  }
+
+  private debugError(
+    stage: string,
+    message: string,
+    error?: any,
+    context?: any
+  ): void {
+    if (!this.isDebugEnabled(context)) return;
+
+    console.error(`[Miruro Debug][${stage}] ${message}`, {
+      name: String(error?.name || "Error"),
+      message: String(error?.message || error || "Unknown error"),
+      stack: String(error?.stack || "").slice(0, 2000),
+    });
+  }
+
+  private sanitizeDebugValue(value: any, depth = 0): any {
+    if (value === undefined) return undefined;
+    if (value === null) return null;
+    if (depth > 3) return "[max-depth]";
+
+    if (typeof value === "string") {
+      if (/^https?:\/\//i.test(value)) {
+        try {
+          const url = new URL(value);
+          return `${url.origin}${url.pathname}`;
+        } catch {
+          return value.slice(0, 300);
+        }
+      }
+      return value.length > 500 ? value.slice(0, 500) + "…" : value;
+    }
+
+    if (
+      typeof value === "number" ||
+      typeof value === "boolean"
+    ) {
+      return value;
+    }
+
+    if (Array.isArray(value)) {
+      return value
+        .slice(0, 20)
+        .map((item) => this.sanitizeDebugValue(item, depth + 1));
+    }
+
+    if (typeof value === "object") {
+      const result: Record<string, any> = {};
+      for (const [key, item] of Object.entries(value).slice(0, 30)) {
+        if (/token|secret|authorization|cookie|password|pipekey|signature/i.test(key)) {
+          result[key] = "[redacted]";
+        } else {
+          result[key] = this.sanitizeDebugValue(item, depth + 1);
+        }
+      }
+      return result;
+    }
+
+    return String(value);
+  }
 
   getSettings(): Settings {
+    this.debug("init", "Provider getSettings() called", {
+      version: "1.1.2",
+      baseUrl: this.baseUrl,
+      debugEnabled: this.isDebugEnabled(),
+    });
+
     return {
       episodeServers: [
         "Auto",
@@ -43,7 +176,18 @@ class Provider {
   }
 
   async search(query: SearchOptions): Promise<SearchResult[]> {
+    const trace = this.nextTrace("search");
     const mode: "sub" | "dub" = query.dub ? "dub" : "sub";
+
+    this.debug(trace, "search() started", {
+      query: query?.query,
+      dub: query?.dub,
+      mediaId:
+        (query as any)?.media?.id ||
+        (query as any)?.media?.anilistId ||
+        (query as any)?.media?.mediaId ||
+        null,
+    }, query);
     const media: any = (query as any).media || {};
     const directId = this.getAniListId(media);
 
@@ -57,6 +201,12 @@ class Provider {
         media.title ||
         query.query;
 
+      this.debug(trace, "Using direct AniList ID supplied by Seanime", {
+        directId,
+        mode,
+        title,
+      }, query);
+
       return [
         {
           id: `${directId}|${mode}`,
@@ -66,6 +216,11 @@ class Provider {
         },
       ];
     }
+
+    this.debug(trace, "No direct AniList ID; calling Miruro search API", {
+      query: query.query,
+      mode,
+    }, query);
 
     const data: any[] = await this.secureGet("search", {
       q: query.query,
@@ -122,6 +277,11 @@ class Provider {
       })
       .sort((a: any, b: any) => b.score - a.score);
 
+    this.debug(trace, "Miruro search API completed", {
+      rawResults: Array.isArray(data) ? data.length : 0,
+      scoredResults: scored.length,
+    }, query);
+
     return scored.slice(0, 10).map(({ item }: any) => ({
       id: `${item.id}|${mode}`,
       title:
@@ -136,9 +296,19 @@ class Provider {
   }
 
   async findEpisodes(providerId: string): Promise<Episode[]> {
+    const trace = this.nextTrace("episodes");
+    this.debug(trace, "findEpisodes() started", { providerId });
+
     const parsed = this.parseProviderId(providerId);
+    this.debug(trace, "Parsed provider ID", parsed);
     const episodeData = await this.getEpisodeData(parsed.anilistId);
     const providers = episodeData?.providers || {};
+
+    this.debug(trace, "Episode API returned provider data", {
+      anilistId: parsed.anilistId,
+      mode: parsed.mode,
+      providers: Object.keys(providers),
+    });
     const merged = new Map<number, Episode>();
 
     for (const providerName of this.providerOrder(providers)) {
@@ -172,6 +342,12 @@ class Provider {
       (a, b) => Number(a.number) - Number(b.number)
     );
 
+    this.debug(trace, "Episode list built", {
+      episodeCount: episodes.length,
+      firstEpisode: episodes[0]?.number || null,
+      lastEpisode: episodes[episodes.length - 1]?.number || null,
+    });
+
     if (!episodes.length) {
       throw new Error(
         `Miruro returned no ${parsed.mode} episodes for AniList ID ${parsed.anilistId}`
@@ -185,6 +361,13 @@ class Provider {
     episode: EpisodeDetails,
     requestedServer: string
   ): Promise<EpisodeServer> {
+    const trace = this.nextTrace("source");
+    this.debug(trace, "findEpisodeServer() started", {
+      episodeId: episode?.id,
+      episodeNumber: episode?.number,
+      requestedServer,
+    });
+
     const parsed = this.parseProviderId(episode.id);
     const episodeNumber = Number(episode.number);
 
@@ -204,6 +387,13 @@ class Provider {
     const candidates = providerSelection
       ? [providerSelection, ...order.filter((name) => name !== providerSelection)]
       : order;
+
+    this.debug(trace, "Source provider candidates selected", {
+      anilistId: parsed.anilistId,
+      mode: parsed.mode,
+      requested,
+      candidates,
+    });
 
     const errors: string[] = [];
     let automaticFallback: {
@@ -237,8 +427,26 @@ class Provider {
             query.anilistId = Number(parsed.anilistId);
           }
 
+          this.debug(trace, "Trying Miruro source adapter", {
+            providerName,
+            category,
+            episodeNumber,
+            episodeId: providerEpisode.id,
+          });
+
           const sourceData = await this.secureGet("sources", query);
           const streams = this.playableStreams(sourceData);
+
+          this.debug(trace, "Source adapter returned", {
+            providerName,
+            category,
+            playableStreamCount: streams.length,
+            subtitleCount: Array.isArray(sourceData?.subtitles)
+              ? sourceData.subtitles.length
+              : Array.isArray(sourceData?.tracks)
+                ? sourceData.tracks.length
+                : 0,
+          });
 
           if (!streams.length) {
             errors.push(`${providerName}/${category}: no HLS or MP4 streams`);
@@ -293,6 +501,11 @@ class Provider {
             );
           }
         } catch (error: any) {
+          this.debugError(
+            trace,
+            `Source adapter failed: ${providerName}/${category}`,
+            error
+          );
           errors.push(
             `${providerName}/${category}: ${error?.message || String(error)}`
           );
@@ -320,9 +533,11 @@ class Provider {
 
   private async getEpisodeData(anilistId: string): Promise<any> {
     if (this.episodeCache.has(anilistId)) {
+      this.debug("cache", "Episode data cache hit", { anilistId });
       return this.episodeCache.get(anilistId);
     }
 
+    this.debug("cache", "Episode data cache miss", { anilistId });
     const data = await this.secureGet("episodes", { anilistId });
     this.episodeCache.set(anilistId, data);
     return data;
@@ -500,77 +715,144 @@ class Provider {
       .replace(/[^a-z0-9]+/g, "");
   }
 
-  private async secureGet(path: string, query: Record<string, any>): Promise<any> {
-    await this.ensurePipeConfig();
+  private async secureGet(
+    path: string,
+    query: Record<string, any>
+  ): Promise<any> {
+    const trace = this.nextTrace(`api-${path}`);
+    const startedAt = Date.now();
 
-    const envelope = {
+    this.debug(trace, "secureGet() started", {
       path,
-      method: "GET",
       query: this.removeUndefined(query),
-      body: null,
-      version: this.protocolVersion,
-    };
-
-    const encoded = this.base64UrlEncode(this.encodeUtf8(JSON.stringify(envelope)));
-    const response = await fetch(
-      `${this.baseUrl}/api/secure/pipe?e=${encodeURIComponent(encoded)}`,
-      {
-        headers: {
-          Accept: "text/plain, application/json",
-          Referer: this.baseUrl + "/",
-          "User-Agent": this.userAgent,
-        },
-      }
-    );
-
-    if (!response.ok) {
-      throw new Error(
-        `Miruro ${path} request failed: ${response.status} ${response.statusText}`
-      );
-    }
-
-    const text = await response.text();
-    const obfuscation = response.headers.get("x-obfuscated");
-
-    if (!obfuscation) {
-      return JSON.parse(text);
-    }
-
-    let bytes = this.base64UrlDecode(text.trim());
-
-    if (obfuscation === "2") {
-      if (!this.pipeKey?.length) {
-        throw new Error("Miruro response key was not available");
-      }
-
-      const decoded = new Uint8Array(bytes.length);
-      for (let index = 0; index < bytes.length; index++) {
-        decoded[index] =
-          bytes[index] ^ this.pipeKey[index % this.pipeKey.length];
-      }
-      bytes = decoded;
-    }
+      protocolVersion: this.protocolVersion,
+    });
 
     try {
-      const inflated = Jr(bytes, undefined);
-      return JSON.parse(this.decodeUtf8(inflated));
-    } catch (error: any) {
-      // The endpoint can return plain JSON in some deployments.
-      try {
-        return JSON.parse(this.decodeUtf8(bytes));
-      } catch {
+      await this.ensurePipeConfig();
+
+      const envelope = {
+        path,
+        method: "GET",
+        query: this.removeUndefined(query),
+        body: null,
+        version: this.protocolVersion,
+      };
+
+      const encoded = this.base64UrlEncode(
+        this.encodeUtf8(JSON.stringify(envelope))
+      );
+
+      const response = await fetch(
+        `${this.baseUrl}/api/secure/pipe?e=${encodeURIComponent(encoded)}`,
+        {
+          headers: {
+            Accept: "text/plain, application/json",
+            Referer: this.baseUrl + "/",
+            "User-Agent": this.userAgent,
+          },
+        }
+      );
+
+      this.debug(trace, "Miruro pipe response received", {
+        status: response.status,
+        statusText: response.statusText,
+        contentType: response.headers.get("content-type"),
+        obfuscation: response.headers.get("x-obfuscated"),
+        protocolVersion: response.headers.get("x-protocol-version"),
+        elapsedMs: Date.now() - startedAt,
+      });
+
+      if (!response.ok) {
         throw new Error(
-          `Unable to decode Miruro ${path} response: ${
-            error?.message || String(error)
-          }`
+          `Miruro ${path} request failed: ${response.status} ${response.statusText}`
         );
       }
+
+      const text = await response.text();
+      const obfuscation = response.headers.get("x-obfuscated");
+
+      if (!obfuscation) {
+        const plainData = JSON.parse(text);
+        this.debug(trace, "Decoded plain JSON response", {
+          resultType: Array.isArray(plainData) ? "array" : typeof plainData,
+          resultCount: Array.isArray(plainData)
+            ? plainData.length
+            : Object.keys(plainData || {}).length,
+        });
+        return plainData;
+      }
+
+      let bytes = this.base64UrlDecode(text.trim());
+
+      if (obfuscation === "2") {
+        if (!this.pipeKey?.length) {
+          throw new Error("Miruro response key was not available");
+        }
+
+        const decoded = new Uint8Array(bytes.length);
+        for (let index = 0; index < bytes.length; index++) {
+          decoded[index] =
+            bytes[index] ^ this.pipeKey[index % this.pipeKey.length];
+        }
+        bytes = decoded;
+      }
+
+      try {
+        const inflated = Jr(bytes, undefined);
+        const decodedData = JSON.parse(this.decodeUtf8(inflated));
+
+        this.debug(trace, "Decoded compressed Miruro response", {
+          obfuscation,
+          compressedBytes: bytes.length,
+          resultType: Array.isArray(decodedData) ? "array" : typeof decodedData,
+          resultCount: Array.isArray(decodedData)
+            ? decodedData.length
+            : Object.keys(decodedData || {}).length,
+          elapsedMs: Date.now() - startedAt,
+        });
+
+        return decodedData;
+      } catch (inflateError: any) {
+        try {
+          const fallbackData = JSON.parse(this.decodeUtf8(bytes));
+          this.debug(trace, "Decoded uncompressed fallback response", {
+            obfuscation,
+            resultType: Array.isArray(fallbackData)
+              ? "array"
+              : typeof fallbackData,
+            elapsedMs: Date.now() - startedAt,
+          });
+          return fallbackData;
+        } catch {
+          throw new Error(
+            `Unable to decode Miruro ${path} response: ${
+              inflateError?.message || String(inflateError)
+            }`
+          );
+        }
+      }
+    } catch (error: any) {
+      this.debugError(trace, `secureGet(${path}) failed`, error);
+      throw error;
     }
   }
 
   private async ensurePipeConfig(): Promise<void> {
-    if (this.pipeKey?.length) return;
-    if (this.configPromise) return this.configPromise;
+    if (this.pipeKey?.length) {
+      this.debug("config", "Pipe configuration already loaded", {
+        protocolVersion: this.protocolVersion,
+        keyLength: this.pipeKey.length,
+      });
+      return;
+    }
+
+    if (this.configPromise) {
+      this.debug("config", "Waiting for an existing configuration request");
+      return this.configPromise;
+    }
+
+    this.debug("config", "Loading Miruro env2.js and JWKS configuration");
 
     this.configPromise = (async () => {
       const [envResult, keyResult] = await Promise.allSettled([
@@ -597,6 +879,19 @@ class Provider {
         }),
       ]);
 
+      this.debug("config", "Configuration requests completed", {
+        envStatus: envResult.status,
+        jwksStatus: keyResult.status,
+        envError:
+          envResult.status === "rejected"
+            ? String(envResult.reason?.message || envResult.reason)
+            : null,
+        jwksError:
+          keyResult.status === "rejected"
+            ? String(keyResult.reason?.message || keyResult.reason)
+            : null,
+      });
+
       if (envResult.status === "fulfilled") {
         const match = envResult.value.match(
           /VITE_PIPE_OBF_KEY[^0-9a-fA-F]+([0-9a-fA-F]{32,})/i
@@ -614,10 +909,19 @@ class Provider {
       // env2.js value above remains authoritative and replaces this when it
       // changes.
       if (!this.pipeKey?.length) {
+        this.debug(
+          "config",
+          "Live pipe key was not found; using captured fallback key"
+        );
         this.pipeKey = this.hexToBytes(
           "71951034f8fbcf53d89db52ceb3dc22c"
         );
       }
+
+      this.debug("config", "Miruro pipe configuration ready", {
+        protocolVersion: this.protocolVersion,
+        keyLength: this.pipeKey?.length || 0,
+      });
     })();
 
     try {
