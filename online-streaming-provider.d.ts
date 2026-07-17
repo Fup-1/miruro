@@ -1,40 +1,80 @@
+declare type SearchResult = {
+    id: string
+    title: string
+    url: string
+    subOrDub: SubOrDub
+}
 
-interface Settings {
-  episodeServers: string[];
-  supportsDub: boolean;
+declare type SubOrDub = "sub" | "dub" | "both"
+
+declare type EpisodeDetails = {
+    id: string
+    number: number
+    url: string
+    title?: string
 }
-interface SearchOptions {
-  query: string;
-  dub: boolean;
-  media: any;
+
+declare type EpisodeServer = {
+    server: string
+    headers: { [key: string]: string }
+    videoSources: VideoSource[]
 }
-interface SearchResult {
-  id: string;
-  title: string;
-  url: string;
-  subOrDub: string;
+
+declare type VideoSourceType = "mp4" | "m3u8" | "unknown"
+
+declare type VideoSource = {
+    url: string
+    type: VideoSourceType
+    quality: string
+    label?: string
+    subtitles: VideoSubtitle[]
 }
-interface Episode {
-  id: string;
-  number: number;
-  title?: string;
-  url: string;
+
+declare type VideoSubtitle = {
+    id: string
+    url: string
+    language: string
+    isDefault: boolean
 }
-interface EpisodeDetails extends Episode {}
-interface Subtitle {
-  id: string;
-  url: string;
-  language: string;
-  isDefault: boolean;
+
+declare interface Media {
+    id: number
+    idMal?: number
+    status?: string
+    format?: string
+    englishTitle?: string
+    romajiTitle?: string
+    episodeCount?: number
+    absoluteSeasonOffset?: number
+    synonyms: string[]
+    isAdult: boolean
+    startDate?: FuzzyDate
 }
-interface VideoSource {
-  url: string;
-  quality: string;
-  type: string;
-  subtitles?: Subtitle[];
+
+declare interface FuzzyDate {
+    year: number
+    month?: number
+    day?: number
 }
-interface EpisodeServer {
-  server: string;
-  headers: Record<string, string>;
-  videoSources: VideoSource[];
+
+declare type SearchOptions = {
+    media: Media
+    query: string
+    dub: boolean
+    year?: number
+}
+
+declare type Settings = {
+    episodeServers: string[]
+    supportsDub: boolean
+}
+
+declare abstract class AnimeProvider {
+    search(opts: SearchOptions): Promise<SearchResult[]>
+    findEpisodes(id: string): Promise<EpisodeDetails[]>
+    findEpisodeServer(
+        episode: EpisodeDetails,
+        server: string
+    ): Promise<EpisodeServer>
+    getSettings(): Settings
 }
