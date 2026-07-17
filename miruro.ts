@@ -151,7 +151,7 @@ class Provider {
 
   getSettings(): Settings {
     this.debug("init", "Provider getSettings() called", {
-      version: "1.1.4",
+      version: "1.1.5",
       baseUrl: this.baseUrl,
       debugEnabled: this.isDebugEnabled(),
     });
@@ -159,17 +159,19 @@ class Provider {
     return {
       episodeServers: [
         "Auto",
-        "HD-1",
-        "HD-2",
-        "Default",
-        "Yt-mp4",
-        "Bonk",
-        "Ally",
-        "Pewe",
-        "Kiwi",
-        "Hop",
-        "Bee",
-        "Moo",
+        "Bonk (S-SUB)",
+        "Bonk (H-SUB)",
+        "Kiwi (H-SUB)",
+        "Hop (S-SUB)",
+        "Ally (H-SUB)",
+        "Pewe (H-SUB)",
+        "Bee (S-SUB)",
+        "Moo (H-SUB)",
+        "Nun (Embed H-SUB)",
+        "Bun (Embed S-SUB)",
+        "Twin (Embed H-SUB)",
+        "Twin (Embed S-SUB)",
+        "Cog (Embed H-SUB)",
       ],
       supportsDub: true,
     };
@@ -362,14 +364,19 @@ class Provider {
     requestedServer: string
   ): Promise<EpisodeServer> {
     const trace = this.nextTrace("source");
+    const parsed = this.parseProviderId(episode.id);
+    const episodeNumber = Number(episode.number);
+    const requested = this.parseRequestedServer(
+      String(requestedServer || "Auto"),
+      parsed.mode
+    );
+
     this.debug(trace, "findEpisodeServer() started", {
       episodeId: episode?.id,
       episodeNumber: episode?.number,
       requestedServer,
+      parsedRequest: requested,
     });
-
-    const parsed = this.parseProviderId(episode.id);
-    const episodeNumber = Number(episode.number);
 
     if (!Number.isFinite(episodeNumber) || episodeNumber <= 0) {
       throw new Error(`Invalid episode number: ${episode.number}`);
@@ -378,43 +385,42 @@ class Provider {
     const episodeData = await this.getEpisodeData(parsed.anilistId);
     const providers = episodeData?.providers || {};
     const order = this.providerOrder(providers);
-    const requested = String(requestedServer || "Auto").trim();
-    const requestedLower = requested.toLowerCase();
-    const providerSelection = order.find(
-      (name) => name.toLowerCase() === requestedLower
-    );
 
-    const candidates = providerSelection
-      ? [providerSelection, ...order.filter((name) => name !== providerSelection)]
+    const candidates = requested.provider
+      ? order.filter((name) => name === requested.provider)
       : order;
 
-    this.debug(trace, "Source provider candidates selected", {
+    this.debug(trace, "Real Miruro provider candidates selected", {
       anilistId: parsed.anilistId,
       mode: parsed.mode,
       requested,
+      availableProviders: Object.keys(providers),
       candidates,
     });
 
     const errors: string[] = [];
-    let automaticFallback: {
-      provider: string;
-      stream: any;
-      sourceData: any;
-    } | null = null;
 
     for (const providerName of candidates) {
       const list = providers?.[providerName]?.episodes?.[parsed.mode];
-      if (!Array.isArray(list)) continue;
+      if (!Array.isArray(list)) {
+        errors.push(`${providerName}: no ${parsed.mode} episode list`);
+        continue;
+      }
 
       const providerEpisode = list.find(
         (item: any) => Number(item?.number) === episodeNumber
       );
-      if (!providerEpisode?.id) continue;
 
-      for (const category of this.categoryCandidates(
-        providerName,
-        parsed.mode
-      )) {
+      if (!providerEpisode?.id) {
+        errors.push(`${providerName}: episode ${episodeNumber} unavailable`);
+        continue;
+      }
+
+      const categories = requested.provider
+        ? [requested.category]
+        : this.categoryCandidates(providerName, parsed.mode);
+
+      for (const category of categories) {
         try {
           const query: Record<string, any> = {
             episodeId: String(providerEpisode.id),
@@ -422,88 +428,66 @@ class Provider {
             category,
           };
 
-          // Miruro's Bonk adapter uses the AniList ID when resolving sources.
           if (providerName === "bonk") {
             query.anilistId = Number(parsed.anilistId);
           }
 
-          this.debug(trace, "Trying Miruro source adapter", {
+          this.debug(trace, "Trying exact Miruro server", {
+            displayName: requested.displayName,
             providerName,
             category,
             episodeNumber,
             episodeId: providerEpisode.id,
+            embedProvider: this.isEmbedProvider(providerName),
           });
 
           const sourceData = await this.secureGet("sources", query);
           const streams = this.playableStreams(sourceData);
+          const embedStreams = this.embedStreams(sourceData);
 
-          this.debug(trace, "Source adapter returned", {
+          this.debug(trace, "Miruro server returned source data", {
             providerName,
             category,
             playableStreamCount: streams.length,
-            subtitleCount: Array.isArray(sourceData?.subtitles)
-              ? sourceData.subtitles.length
-              : Array.isArray(sourceData?.tracks)
-                ? sourceData.tracks.length
-                : 0,
+            embedStreamCount: embedStreams.length,
+            streamTypes: [
+              ...(Array.isArray(sourceData?.streams)
+                ? sourceData.streams
+                : Array.isArray(sourceData?.sources)
+                  ? sourceData.sources
+                  : []
+              ),
+            ].map((stream: any) => String(stream?.type || "unknown")),
           });
 
-          if (!streams.length) {
-            errors.push(`${providerName}/${category}: no HLS or MP4 streams`);
-            continue;
-          }
+          if (streams.length) {
+            const preferred =
+              streams.find((stream: any) => Boolean(stream?.default)) ||
+              streams.find((stream: any) =>
+                /hls|m3u8/i.test(String(stream?.type || ""))
+              ) ||
+              streams[0];
 
-          const exact = streams.find(
-            (stream: any) =>
-              String(stream?.server || "").toLowerCase() === requestedLower
-          );
-
-          const preferred =
-            streams.find((stream: any) => Boolean(stream?.default)) ||
-            streams.find(
-              (stream: any) =>
-                String(stream?.type || "").toLowerCase() === "hls"
-            ) ||
-            streams[0];
-
-          if (!automaticFallback && preferred) {
-            automaticFallback = {
-              provider: providerName,
-              stream: preferred,
-              sourceData,
-            };
-          }
-
-          if (providerSelection && providerName === providerSelection) {
             return this.buildEpisodeServer(
               providerName,
               preferred,
               sourceData,
-              requested
+              requested.displayName
             );
           }
 
-          if (requestedLower === "auto") {
-            return this.buildEpisodeServer(
-              providerName,
-              preferred,
-              sourceData,
-              requested
+          if (embedStreams.length) {
+            throw new Error(
+              `${requested.displayName} is an iframe/embed server. ` +
+              `Seanime online-stream extensions require a direct HLS or MP4 source.`
             );
           }
 
-          if (exact) {
-            return this.buildEpisodeServer(
-              providerName,
-              exact,
-              sourceData,
-              requested
-            );
-          }
+          errors.push(`${providerName}/${category}: no direct HLS or MP4 stream`);
         } catch (error: any) {
           this.debugError(
             trace,
-            `Source adapter failed: ${providerName}/${category}`,
+            `Server failed: ${providerName}/${category}`,
             error
           );
           errors.push(
@@ -511,23 +495,14 @@ class Provider {
           );
         }
       }
-    }
 
-    // A named server is not present on every show. Fall back to the first
-    // playable stream so selecting HD-1 does not make an Ally-only show fail.
-    if (automaticFallback) {
-      return this.buildEpisodeServer(
-        automaticFallback.provider,
-        automaticFallback.stream,
-        automaticFallback.sourceData,
-        requested
-      );
+      // A specifically selected server must not silently switch providers.
+      if (requested.provider) break;
     }
 
     throw new Error(
-      `No playable Miruro stream for episode ${episodeNumber}. ${errors.join(
-        " | "
-      )}`
+      `No playable Miruro stream for episode ${episodeNumber} using ` +
+      `${requested.displayName}. ${errors.join(" | ")}`
     );
   }
 
@@ -544,12 +519,27 @@ class Provider {
   }
 
   private providerOrder(providers: Record<string, any>): string[] {
-    const preferred = ["bonk", "ally", "pewe", "kiwi", "hop", "bee", "moo"];
+    // Mirrors Miruro's visible provider order.
+    const preferred = [
+      "bonk",
+      "bee",
+      "ally",
+      "kiwi",
+      "hop",
+      "pewe",
+      "moo",
+      "nun",
+      "bun",
+      "twin",
+      "cog",
+    ];
     const available = Object.keys(providers || {});
 
     return [
       ...preferred.filter((name) => available.includes(name)),
-      ...available.filter((name) => !preferred.includes(name)),
+      ...available.filter(
+        (name) => !preferred.includes(name) && name !== "telli"
+      ),
     ];
   }
 
@@ -558,8 +548,71 @@ class Provider {
     mode: "sub" | "dub"
   ): string[] {
     if (mode === "dub") return ["dub"];
-    if (providerName === "bonk") return ["ssub", "sub"];
-    return ["sub", "ssub"];
+
+    const variants: Record<string, string[]> = {
+      bonk: ["ssub", "sub"],
+      bee: ["ssub"],
+      ally: ["sub"],
+      kiwi: ["sub"],
+      hop: ["ssub"],
+      pewe: ["sub"],
+      moo: ["sub"],
+      nun: ["sub"],
+      bun: ["ssub"],
+      twin: ["sub", "ssub"],
+      cog: ["sub"],
+    };
+
+    return variants[providerName] || ["sub", "ssub"];
+  }
+
+  private parseRequestedServer(
+    value: string,
+    mode: "sub" | "dub"
+  ): {
+    displayName: string;
+    provider: string | null;
+    category: string;
+    embed: boolean;
+  } {
+    const displayName = value.trim() || "Auto";
+    const normalized = displayName.toLowerCase();
+
+    if (normalized === "auto") {
+      return {
+        displayName: "Auto",
+        provider: null,
+        category: mode === "dub" ? "dub" : "sub",
+        embed: false,
+      };
+    }
+
+    const providerMatch = normalized.match(
+      /^(bonk|kiwi|hop|ally|pewe|bee|moo|nun|bun|twin|cog)/
+    );
+
+    if (!providerMatch) {
+      throw new Error(`Unknown Miruro server selection: ${displayName}`);
+    }
+
+    const provider = providerMatch[1];
+    const category =
+      mode === "dub"
+        ? "dub"
+        : normalized.includes("s-sub")
+          ? "ssub"
+          : "sub";
+
+    return {
+      displayName,
+      provider,
+      category,
+      embed: this.isEmbedProvider(provider),
+    };
+  }
+
+  private isEmbedProvider(providerName: string): boolean {
+    return ["nun", "bun", "twin", "cog"].includes(providerName);
   }
 
   private playableStreams(sourceData: any): any[] {
@@ -581,6 +634,20 @@ class Provider {
           /\.m3u8(?:$|\?)/i.test(url) ||
           /\.mp4(?:$|\?)/i.test(url))
       );
+    });
+  }
+
+  private embedStreams(sourceData: any): any[] {
+    const streams = Array.isArray(sourceData?.streams)
+      ? sourceData.streams
+      : Array.isArray(sourceData?.sources)
+        ? sourceData.sources
+        : [];
+
+    return streams.filter((stream: any) => {
+      const type = String(stream?.type || "").toLowerCase();
+      const url = String(stream?.url || stream?.file || "").trim();
+      return Boolean(url) && stream?.isActive !== false && type === "embed";
     });
   }
 
