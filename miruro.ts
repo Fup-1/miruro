@@ -151,7 +151,7 @@ class Provider {
 
   getSettings(): Settings {
     this.debug("init", "Provider getSettings() called", {
-      version: "1.1.2",
+      version: "1.1.4",
       baseUrl: this.baseUrl,
       debugEnabled: this.isDebugEnabled(),
     });
@@ -597,10 +597,50 @@ class Provider {
         ? "m3u8"
         : "mp4";
 
-    const referer = String(
-      stream?.referer || sourceData?.headers?.Referer || this.baseUrl + "/"
-    );
-    const origin = this.safeOrigin(referer, url);
+    const mediaHost = this.safeHostname(url);
+    const isUltracloud =
+      mediaHost === "ultracloud.cc" ||
+      mediaHost.endsWith(".ultracloud.cc");
+
+    // Firefox shows that Ultracloud only serves Miruro playlists when the
+    // request carries Miruro's own page origin and referer. Source adapters
+    // may report an embed-host referer, which causes Seanime's media proxy to
+    // stall indefinitely.
+    const referer = isUltracloud
+      ? this.baseUrl + "/"
+      : String(
+          stream?.referer ||
+            this.getHeaderCaseInsensitive(sourceData?.headers, "referer") ||
+            this.baseUrl + "/"
+        );
+
+    const origin = isUltracloud
+      ? this.baseUrl
+      : this.safeOrigin(referer, url);
+
+    const cleanHeaders = this.normalizePlaybackHeaders(sourceData?.headers);
+    const playbackHeaders: Record<string, string> = {
+      ...cleanHeaders,
+      Accept: "*/*",
+      "Accept-Language": "en-US,en;q=0.9",
+      Referer: referer,
+      Origin: origin,
+      "User-Agent": this.userAgent,
+      Pragma: "no-cache",
+      "Cache-Control": "no-cache",
+    };
+
+    this.debug("playback", "Built final playback source", {
+      providerName,
+      requestedServer,
+      mediaHost,
+      type,
+      isUltracloud,
+      referer,
+      origin,
+      url,
+      headerNames: Object.keys(playbackHeaders),
+    });
 
     const subtitleItems = Array.isArray(sourceData?.subtitles)
       ? sourceData.subtitles
@@ -630,12 +670,7 @@ class Provider {
             ? providerName
             : requestedServer)
       ),
-      headers: {
-        ...(sourceData?.headers || {}),
-        Referer: referer,
-        Origin: origin,
-        "User-Agent": this.userAgent,
-      },
+      headers: playbackHeaders,
       videoSources: [
         {
           url,
@@ -645,6 +680,59 @@ class Provider {
         },
       ],
     };
+  }
+
+  private safeHostname(value: string): string {
+    try {
+      return new URL(value).hostname.toLowerCase();
+    } catch {
+      return "";
+    }
+  }
+
+  private getHeaderCaseInsensitive(
+    headers: Record<string, any> | null | undefined,
+    name: string
+  ): string | null {
+    if (!headers || typeof headers !== "object") return null;
+
+    const target = name.toLowerCase();
+    for (const [key, value] of Object.entries(headers)) {
+      if (key.toLowerCase() === target && value != null) {
+        return String(value);
+      }
+    }
+
+    return null;
+  }
+
+  private normalizePlaybackHeaders(
+    headers: Record<string, any> | null | undefined
+  ): Record<string, string> {
+    const result: Record<string, string> = {};
+    if (!headers || typeof headers !== "object") return result;
+
+    // Remove values that will be set explicitly below. This prevents duplicate
+    // differently-cased Referer/Origin/User-Agent headers in Go's HTTP client.
+    const reserved = new Set([
+      "referer",
+      "origin",
+      "user-agent",
+      "accept",
+      "accept-language",
+      "cache-control",
+      "pragma",
+      "cookie",
+      "authorization",
+    ]);
+
+    for (const [key, value] of Object.entries(headers)) {
+      if (reserved.has(key.toLowerCase())) continue;
+      if (value == null) continue;
+      result[key] = String(value);
+    }
+
+    return result;
   }
 
   private safeOrigin(referer: string, mediaUrl: string): string {
